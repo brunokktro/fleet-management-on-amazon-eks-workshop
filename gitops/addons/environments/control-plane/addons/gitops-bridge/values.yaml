@@ -12,7 +12,7 @@ addons:
   adot_collector:
     enabled: true
   argocd:
-    enabled: true # ArgoCD is enabled to replace the argocd installed at bootstrap time via terraform helm provider
+    enabled: false # The hub Argo CD is the EKS Capability for Argo CD (managed, outside the cluster); a chart here would start a second controller on the same Application objects
   aws_ebs_csi_resources:
     enabled: true
   aws_load_balancer_controller:
