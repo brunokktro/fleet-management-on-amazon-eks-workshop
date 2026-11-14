@@ -354,7 +354,11 @@ spec:
             services.k8s.aws/region: ${schema.spec.region}
         spec:
           name: "fleet-hub-cluster/${schema.spec.name}"
-          description: "GitOps Bridge payload for ${schema.spec.name} (created by kro EksCluster)"
+          # The version is in the description on purpose: the controller compares the Secret
+          # REFERENCE, not its value, so a changed payload alone never reaches Secrets Manager.
+          # A changed description is a non-tag delta, and UpdateSecret re-reads the payload with it
+          # (measured 2026-11-14 on the 1.34 -> 1.35 upgrade).
+          description: "GitOps Bridge payload for ${schema.spec.name} (Kubernetes ${schema.spec.k8sVersion}, created by kro EksCluster)"
           recoveryWindowInDays: 0
           secretString:
             name: "${bridgePayload.metadata.name}"
