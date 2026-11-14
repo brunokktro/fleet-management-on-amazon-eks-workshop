@@ -6,12 +6,14 @@ HUB_CLUSTER_NAME=${HUB_CLUSTER_NAME:-fleet-hub-cluster}
 SPOKE_CLUSTER_PREFIX=${SPOKE_CLUSTER_NAME_PREFIX:-fleet-spoke}
 SPOKE_STAGING_CLUSTER="${SPOKE_CLUSTER_PREFIX}-staging"
 SPOKE_PROD_CLUSTER="${SPOKE_CLUSTER_PREFIX}-prod"
+SPOKE_DEV_CLUSTER="${SPOKE_CLUSTER_PREFIX}-dev"
 
 # kube context ALIASES are what the workshop pages type (kubectl --context fleet-staging-cluster).
 # They stay fixed whatever the EKS cluster names are, so the content never changes with a prefix.
 export HUB_CONTEXT=${HUB_CONTEXT:-fleet-hub-cluster}
 export STAGING_CONTEXT=${STAGING_CONTEXT:-fleet-staging-cluster}
 export PROD_CONTEXT=${PROD_CONTEXT:-fleet-prod-cluster}
+export DEV_CONTEXT=${DEV_CONTEXT:-fleet-dev-cluster}
 
 echo "Using the following cluster names:"
 echo "- Hub cluster: $HUB_CLUSTER_NAME"
@@ -63,3 +65,13 @@ update_kubeconfig_if_needed_with_role "$SPOKE_PROD_CLUSTER" "${PROD_CONTEXT}-fro
 update_kubeconfig_if_needed "$SPOKE_PROD_CLUSTER" "$PROD_CONTEXT"
 update_kubeconfig_if_needed "$SPOKE_STAGING_CLUSTER" "$STAGING_CONTEXT"
 update_kubeconfig_if_needed "$HUB_CLUSTER_NAME" "$HUB_CONTEXT"
+
+# The dev spoke is created during the workshop by the kro EksCluster graph, so its context is
+# added on demand: run fleet_dev_kubeconfig once the cluster is ACTIVE.
+fleet_dev_kubeconfig() {
+    if ! aws eks --region $AWS_REGION describe-cluster --name "$SPOKE_DEV_CLUSTER" --query cluster.status --output text 2>/dev/null | grep -q ACTIVE; then
+        echo "$SPOKE_DEV_CLUSTER is not ACTIVE yet (kubectl get ekscluster -n fleet-kro)"
+        return 1
+    fi
+    update_kubeconfig_if_needed "$SPOKE_DEV_CLUSTER" "$DEV_CONTEXT"
+}

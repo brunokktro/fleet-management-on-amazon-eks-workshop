@@ -26,6 +26,11 @@ function argocd_staging_credentials (){
 function argocd_prod_credentials (){
 	argocd_credentials ${PROD_CONTEXT:-fleet-prod-cluster} 8083
 }
+# fleet-spoke-dev exists only after the kro EksCluster lab (module fleet lifecycle)
+function argocd_dev_credentials (){
+	fleet_dev_kubeconfig || return 1
+	argocd_credentials ${DEV_CONTEXT:-fleet-dev-cluster} 8084
+}
 
 
 

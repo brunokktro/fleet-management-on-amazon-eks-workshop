@@ -1,0 +1,367 @@
+# EksCluster: one object that creates a fleet spoke on EKS Auto Mode and registers it
+# through the GitOps Bridge contract (Secrets Manager secret fleet-hub-cluster/<name>).
+#
+# Trimmed from the upstream pattern patterns/kro-eks-cluster-mgmt/charts/kro/resource-groups/eks/rg-eks.yaml:
+# no VPC, no Karpenter, no observability roles. Auto Mode owns networking, storage,
+# load balancing and the Pod Identity agent, so the graph only needs the cluster, the
+# roles Argo CD and External Secrets assume, and the bridge payload.
+#
+# Requires the ACK and kro EKS Capabilities on the hub (team stack, cdk/lib/team-stack.ts).
+---
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: ekscluster.kro.run
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: EksCluster
+    spec:
+      name: string
+      tenant: string | default="tenant1"
+      environment: string | default="dev"
+      region: string
+      accountId: string
+      k8sVersion: string | default="1.34"
+      # IAM principal that gets cluster-admin on the new cluster (the participant role)
+      adminRoleArn: string
+      # Role the hub Argo CD runs as (SSM eks-fleet-workshop-gitops-argocd-central-role)
+      hubArgocdRoleArn: string
+      network:
+        vpcId: string
+        subnet1Id: string
+        subnet2Id: string
+    status:
+      clusterArn: ${ekscluster.status.ackResourceMetadata.arn}
+      clusterState: ${ekscluster.status.status}
+      endpoint: ${ekscluster.status.endpoint}
+      version: ${ekscluster.spec.version}
+      bridgeSecretArn: ${bridgeSecret.status.ackResourceMetadata.arn}
+
+  resources:
+
+    ###########################################################
+    # IAM roles for the cluster and its Auto Mode node pools
+    ###########################################################
+    - id: clusterRole
+      template:
+        apiVersion: iam.services.k8s.aws/v1alpha1
+        kind: Role
+        metadata:
+          name: "${schema.spec.name}-cluster-role"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          name: "${schema.spec.name}-cluster-role"
+          policies:
+            - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+            - arn:aws:iam::aws:policy/AmazonEKSComputePolicy
+            - arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy
+            - arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy
+            - arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy
+          assumeRolePolicyDocument: |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": { "Service": "eks.amazonaws.com" },
+                  "Action": ["sts:AssumeRole", "sts:TagSession"]
+                }
+              ]
+            }
+          tags:
+            - key: kro-management
+              value: "${schema.spec.name}"
+
+    - id: nodeRole
+      template:
+        apiVersion: iam.services.k8s.aws/v1alpha1
+        kind: Role
+        metadata:
+          name: "${schema.spec.name}-node-role"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          name: "${schema.spec.name}-node-role"
+          policies:
+            - arn:aws:iam::aws:policy/AmazonEKSWorkerNodeMinimalPolicy
+            - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+          assumeRolePolicyDocument: |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": { "Service": "ec2.amazonaws.com" },
+                  "Action": ["sts:AssumeRole", "sts:TagSession"]
+                }
+              ]
+            }
+          tags:
+            - key: kro-management
+              value: "${schema.spec.name}"
+
+    ###########################################################
+    # EKS Auto Mode cluster
+    # https://aws-controllers-k8s.github.io/community/reference/eks/v1alpha1/cluster/
+    ###########################################################
+    - id: ekscluster
+      readyWhen:
+        - ${ekscluster.status.status == "ACTIVE"}
+      template:
+        apiVersion: eks.services.k8s.aws/v1alpha1
+        kind: Cluster
+        metadata:
+          name: "${schema.spec.name}"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          name: "${schema.spec.name}"
+          version: "${schema.spec.k8sVersion}"
+          roleARN: "${clusterRole.status.ackResourceMetadata.arn}"
+          accessConfig:
+            authenticationMode: API
+            bootstrapClusterCreatorAdminPermissions: false
+          # Auto Mode: EKS owns compute, block storage and load balancing.
+          bootstrapSelfManagedAddons: false
+          computeConfig:
+            enabled: true
+            nodeRoleARN: "${nodeRole.status.ackResourceMetadata.arn}"
+            nodePools:
+              - system
+              - general-purpose
+          kubernetesNetworkConfig:
+            ipFamily: ipv4
+            elasticLoadBalancing:
+              enabled: true
+          storageConfig:
+            blockStorage:
+              enabled: true
+          resourcesVPCConfig:
+            endpointPrivateAccess: true
+            endpointPublicAccess: true
+            subnetIDs:
+              - "${schema.spec.network.subnet1Id}"
+              - "${schema.spec.network.subnet2Id}"
+          upgradePolicy:
+            supportType: STANDARD
+          logging:
+            clusterLogging:
+              - enabled: true
+                types:
+                  - api
+                  - audit
+                  - authenticator
+          tags:
+            kro-management: "${schema.spec.name}"
+            tenant: "${schema.spec.tenant}"
+            environment: "${schema.spec.environment}"
+            Blueprint: "${schema.spec.name}"
+
+    ###########################################################
+    # Argo CD access: the hub Argo CD assumes this role to reach the spoke
+    # (same contract as aws_iam_role.spoke in terraform/spokes/main.tf)
+    ###########################################################
+    - id: argocdRole
+      template:
+        apiVersion: iam.services.k8s.aws/v1alpha1
+        kind: Role
+        metadata:
+          name: "${schema.spec.name}-argocd-spoke"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          name: "${schema.spec.name}-argocd-spoke"
+          assumeRolePolicyDocument: |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": { "AWS": "${schema.spec.hubArgocdRoleArn}" },
+                  "Action": ["sts:AssumeRole", "sts:TagSession"]
+                }
+              ]
+            }
+          tags:
+            - key: kro-management
+              value: "${schema.spec.name}"
+
+    - id: accessEntryArgocd
+      template:
+        apiVersion: eks.services.k8s.aws/v1alpha1
+        kind: AccessEntry
+        metadata:
+          name: "${schema.spec.name}-access-argocd"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          clusterName: "${ekscluster.spec.name}"
+          principalARN: "${argocdRole.status.ackResourceMetadata.arn}"
+          type: STANDARD
+          accessPolicies:
+            - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+              accessScope:
+                type: cluster
+
+    - id: accessEntryAdmin
+      template:
+        apiVersion: eks.services.k8s.aws/v1alpha1
+        kind: AccessEntry
+        metadata:
+          name: "${schema.spec.name}-access-admin"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          clusterName: "${ekscluster.spec.name}"
+          principalARN: "${schema.spec.adminRoleArn}"
+          type: STANDARD
+          accessPolicies:
+            - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+              accessScope:
+                type: cluster
+
+    ###########################################################
+    # External Secrets on the spoke reads Secrets Manager through Pod Identity
+    # (same contract as module.external_secrets_pod_identity in terraform/spokes)
+    ###########################################################
+    - id: externalSecretsRole
+      template:
+        apiVersion: iam.services.k8s.aws/v1alpha1
+        kind: Role
+        metadata:
+          name: "${schema.spec.name}-external-secrets"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          name: "${schema.spec.name}-external-secrets"
+          assumeRolePolicyDocument: |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": { "Service": "pods.eks.amazonaws.com" },
+                  "Action": ["sts:AssumeRole", "sts:TagSession"]
+                }
+              ]
+            }
+          inlinePolicies:
+            external-secrets: |
+              {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "secretsmanager:GetSecretValue",
+                      "secretsmanager:DescribeSecret",
+                      "secretsmanager:ListSecretVersionIds",
+                      "secretsmanager:ListSecrets",
+                      "secretsmanager:BatchGetSecretValue"
+                    ],
+                    "Resource": "arn:aws:secretsmanager:*:${schema.spec.accountId}:secret:*"
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": ["ssm:GetParameter", "ssm:GetParameters", "ssm:DescribeParameters"],
+                    "Resource": "arn:aws:ssm:*:${schema.spec.accountId}:parameter/*"
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": ["kms:Decrypt"],
+                    "Resource": "arn:aws:kms:*:${schema.spec.accountId}:key/*"
+                  }
+                ]
+              }
+          tags:
+            - key: kro-management
+              value: "${schema.spec.name}"
+
+    - id: externalSecretsPodIdentity
+      template:
+        apiVersion: eks.services.k8s.aws/v1alpha1
+        kind: PodIdentityAssociation
+        metadata:
+          name: "${schema.spec.name}-external-secrets"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          clusterName: "${ekscluster.spec.name}"
+          namespace: external-secrets
+          serviceAccount: external-secrets-sa
+          roleARN: "${externalSecretsRole.status.ackResourceMetadata.arn}"
+
+    ###########################################################
+    # GitOps Bridge payload: the same JSON Terraform writes for staging and prod.
+    # fleet-hub-secrets (ExternalSecret on the hub) turns it into the Argo CD cluster Secret.
+    ###########################################################
+    - id: bridgePayload
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: "${schema.spec.name}-bridge-payload"
+        type: Opaque
+        stringData:
+          bridge: |
+            {
+              "addons": {
+                "aws_cluster_name": "${schema.spec.name}",
+                "install_argocd": "true",
+                "kubernetes_version": "${schema.spec.k8sVersion}",
+                "compute": "auto-mode",
+                "provisioner": "kro"
+              },
+              "metadata": {
+                "aws_account_id": "${schema.spec.accountId}",
+                "aws_cluster_name": "${schema.spec.name}",
+                "aws_region": "${schema.spec.region}",
+                "aws_vpc_id": "${schema.spec.network.vpcId}",
+                "external_secrets_namespace": "external-secrets",
+                "external_secrets_service_account": "external-secrets-sa",
+                "external_secrets_namespace_fleet": "argocd",
+                "external_secrets_service_account_fleet": "external-secrets-sa",
+                "aws_load_balancer_controller_namespace": "kube-system",
+                "aws_load_balancer_controller_service_account": "aws-load-balancer-controller-sa",
+                "karpenter_namespace": "kube-system",
+                "karpenter_service_account": "karpenter",
+                "karpenter_node_iam_role_name": "${schema.spec.name}-node-role",
+                "karpenter_sqs_queue_name": "none",
+                "adot_collector_namespace": "adot-collector-kubeprometheus",
+                "adot_collector_service_account": "adot-collector-kubeprometheus",
+                "amp_endpoint_url": "none"
+              },
+              "server": "${ekscluster.status.endpoint}",
+              "config": {
+                "tlsClientConfig": {
+                  "insecure": false,
+                  "caData": "${ekscluster.status.certificateAuthority.data}"
+                },
+                "awsAuthConfig": {
+                  "clusterName": "${schema.spec.name}",
+                  "roleARN": "${argocdRole.status.ackResourceMetadata.arn}"
+                }
+              }
+            }
+
+    - id: bridgeSecret
+      template:
+        apiVersion: secretsmanager.services.k8s.aws/v1alpha1
+        kind: Secret
+        metadata:
+          name: "${schema.spec.name}-bridge"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          name: "fleet-hub-cluster/${schema.spec.name}"
+          description: "GitOps Bridge payload for ${schema.spec.name} (created by kro EksCluster)"
+          recoveryWindowInDays: 0
+          secretString:
+            name: "${bridgePayload.metadata.name}"
+            key: bridge
+          tags:
+            - key: kro-management
+              value: "${schema.spec.name}"

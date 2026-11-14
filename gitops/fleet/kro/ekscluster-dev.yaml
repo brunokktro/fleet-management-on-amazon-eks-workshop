@@ -1,0 +1,20 @@
+# EksCluster instance for the dev spoke. Render with envsubst (see gitops/fleet/kro/render-dev.sh):
+# the network and identity values come from the account, everything else is the fleet contract.
+apiVersion: kro.run/v1alpha1
+kind: EksCluster
+metadata:
+  name: fleet-spoke-dev
+  namespace: fleet-kro
+spec:
+  name: fleet-spoke-dev
+  tenant: tenant1
+  environment: dev
+  region: ${AWS_REGION}
+  accountId: "${AWS_ACCOUNT_ID}"
+  k8sVersion: "${DEV_K8S_VERSION}"
+  adminRoleArn: ${PARTICIPANT_ROLE_ARN}
+  hubArgocdRoleArn: ${HUB_ARGOCD_ROLE_ARN}
+  network:
+    vpcId: ${HUB_VPC_ID}
+    subnet1Id: ${HUB_SUBNET_1}
+    subnet2Id: ${HUB_SUBNET_2}

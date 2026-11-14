@@ -1,0 +1,23 @@
+# Read-only adoption of the Terraform-created prod spoke into ACK.
+# The controller finds the cluster by name, fills spec and status from the API, and never
+# calls Update or Delete on it (services.k8s.aws/read-only). Deleting this object leaves
+# the cluster untouched (services.k8s.aws/deletion-policy: retain).
+# The required spec fields are filled from `aws eks describe-cluster` (gitops/fleet/kro/render-adopt-prod.sh).
+apiVersion: eks.services.k8s.aws/v1alpha1
+kind: Cluster
+metadata:
+  name: fleet-spoke-prod
+  namespace: fleet-kro
+  annotations:
+    services.k8s.aws/adoption-policy: adopt
+    services.k8s.aws/adoption-fields: '{"name": "fleet-spoke-prod"}'
+    services.k8s.aws/read-only: "true"
+    services.k8s.aws/deletion-policy: retain
+    services.k8s.aws/region: ${AWS_REGION}
+spec:
+  name: fleet-spoke-prod
+  roleARN: ${PROD_CLUSTER_ROLE_ARN}
+  resourcesVPCConfig:
+    subnetIDs:
+      - ${PROD_SUBNET_1}
+      - ${PROD_SUBNET_2}

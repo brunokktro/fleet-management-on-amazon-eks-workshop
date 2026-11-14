@@ -1,0 +1,46 @@
+# Add-ons for fleet-spoke-dev, an EKS Auto Mode cluster created by the kro EksCluster graph.
+# Auto Mode owns compute, networking, block storage and load balancing, so Karpenter,
+# the AWS Load Balancer Controller, the EBS CSI resources and the CNI metrics helper stay off.
+# Argo CD and External Secrets are installed from the hub (fleet-spoke-argocd and
+# fleet-spoke-external-secrets ApplicationSets), as on staging and prod.
+addons:
+  adot_collector:
+    enabled: false
+  argocd:
+    enabled: false
+  aws_ebs_csi_resources:
+    enabled: false
+  aws_load_balancer_controller:
+    enabled: false
+  cert_manager:
+    enabled: true
+  cni_metrics_helper:
+    enabled: false
+  cw_prometheus:
+    enabled: false
+  eks_upgrade_insights_demo:
+    enabled: false
+  external_dns:
+    enabled: false
+  external_secrets:
+    enabled: false
+  grafana_operator:
+    enabled: false
+  karpenter:
+    enabled: false
+  kube_state_metrics:
+    enabled: true
+  kro:
+    enabled: false
+  kyverno:
+    enabled: true
+  kyverno_policies:
+    enabled: true
+  kyverno_policy_reporter:
+    enabled: true
+  metrics_server:
+    enabled: true
+  opentelemetry_operator:
+    enabled: false
+  prometheus_node_exporter:
+    enabled: false

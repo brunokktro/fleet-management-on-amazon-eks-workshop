@@ -1,0 +1,4 @@
+tenant: "tenant1"
+environment: "dev"
+clusterName: "fleet-spoke-dev"
+secretManagerSecretName: "fleet-hub-cluster/fleet-spoke-dev"
