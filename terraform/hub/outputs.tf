@@ -13,11 +13,11 @@ output "configure_argocd" {
     aws eks --region ${local.region} update-kubeconfig --name ${module.eks.cluster_name}
     kubectl config set-context --current --namespace argocd
     argocd login --core
-    echo "Argo CD URL: ${data.aws_ssm_parameter.argocd_server_url.value} (LOG IN VIA SSO, user ${var.argocd_admin_user_name})"
+    echo "Argo CD URL: ${nonsensitive(data.aws_ssm_parameter.argocd_server_url.value)} (LOG IN VIA SSO, user ${var.argocd_admin_user_name})"
     EOT
 }
 
 output "access_argocd" {
   description = "ArgoCD Access"
-  value       = "${data.aws_ssm_parameter.argocd_server_url.value} (LOG IN VIA SSO, Identity Center user ${var.argocd_admin_user_name})"
+  value       = "${nonsensitive(data.aws_ssm_parameter.argocd_server_url.value)} (LOG IN VIA SSO, Identity Center user ${var.argocd_admin_user_name})"
 }
