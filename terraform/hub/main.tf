@@ -215,14 +215,9 @@ data "aws_ssm_parameter" "amp_endpoint" {
 ################################################################################
 # GitOps Bridge: Private ssh keys for git
 ################################################################################
-resource "kubernetes_namespace" "argocd" {
-  depends_on = [module.eks]
-  metadata {
-    name = local.argocd_namespace
-  }
-}
+# The argocd namespace is created by the Argo CD capability (argocd-capability.tf).
 resource "kubernetes_secret" "git_secrets" {
-  depends_on = [kubernetes_namespace.argocd]
+  depends_on = [null_resource.argocd_capability]
   for_each = {
     git-addons = {
       type                  = "git"
@@ -251,7 +246,7 @@ resource "kubernetes_secret" "git_secrets" {
   }
   metadata {
     name      = each.key
-    namespace = kubernetes_namespace.argocd.metadata[0].name
+    namespace = local.argocd_namespace
     labels = {
       "argocd.argoproj.io/secret-type" = "repository"
     }
@@ -264,23 +259,23 @@ resource "kubernetes_secret" "git_secrets" {
 module "gitops_bridge_bootstrap" {
   source = "gitops-bridge-dev/gitops-bridge/helm"
   version = "0.1.0"
+  # Argo CD itself is the EKS Capability created in argocd-capability.tf, so the module only
+  # writes the hub cluster Secret (server = cluster ARN, the managed Argo CD addresses clusters
+  # by ARN) and the bootstrap ApplicationSets. No Helm release, no pods on the hub.
+  install = false
   cluster = {
     cluster_name = module.eks.cluster_name
     environment  = local.environment
     metadata     = local.addons_metadata
     addons       = local.addons
+    server       = module.eks.cluster_arn
   }
 
   apps = local.argocd_apps
   argocd = {
-    name = "argocd"
-    namespace        = local.argocd_namespace
-    chart_version    = "10.11.7"
-    values = [file("${path.module}/argocd-initial-values.yaml")]
-    timeout          = 600
-    create_namespace = false
+    namespace = local.argocd_namespace
   }
-  depends_on = [kubernetes_secret.git_secrets]
+  depends_on = [kubernetes_secret.git_secrets, null_resource.argocd_capability]
 }
 
 ################################################################################

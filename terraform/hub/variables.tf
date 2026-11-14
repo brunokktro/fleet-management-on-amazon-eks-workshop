@@ -88,3 +88,9 @@ variable "cluster_name" {
   type        = string
   default     = "fleet-hub-cluster"
 }
+
+variable "argocd_admin_user_name" {
+  description = "IAM Identity Center user mapped to the Argo CD ADMIN role of the hub capability"
+  type        = string
+  default     = "workshop-admin"
+}

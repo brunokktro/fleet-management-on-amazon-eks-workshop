@@ -147,24 +147,10 @@ module "karpenter" {
   tags = local.tags
 }
 ################################################################################
-# ArgoCD EKS Pod Identity Association
+# ArgoCD: runs as an EKS Capability (argocd-capability.tf). No Pod Identity needed.
 ################################################################################
 data "aws_ssm_parameter" "argocd_hub_role" {
   name = "${local.context_prefix}-${var.ssm_parameter_name_argocd_role_suffix}"
-}
-resource "aws_eks_pod_identity_association" "argocd_controller" {
-  cluster_name    = module.eks.cluster_name
-  namespace       = "argocd"
-  service_account = "argocd-application-controller"
-  role_arn        = data.aws_ssm_parameter.argocd_hub_role.value
-  tags = local.tags
-}
-resource "aws_eks_pod_identity_association" "argocd_server" {
-  cluster_name    = module.eks.cluster_name
-  namespace       = "argocd"
-  service_account = "argocd-server"
-  role_arn        = data.aws_ssm_parameter.argocd_hub_role.value
-  tags = local.tags
 }
 
 ################################################################################

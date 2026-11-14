@@ -171,36 +171,12 @@ resource "aws_secretsmanager_secret_version" "argocd_cluster_secret_version" {
   secret_string = jsonencode({
     metadata     = local.addons_metadata
     addons       = local.addons
-    server       = module.eks.cluster_endpoint
-    config = {
-      tlsClientConfig = {
-        insecure = false,
-        caData   = module.eks.cluster_certificate_authority_data
-      },
-      awsAuthConfig = {
-        clusterName = module.eks.cluster_name,
-        roleARN     = aws_iam_role.spoke.arn
-      }
-    }
+    # The hub Argo CD is an EKS Capability: it addresses clusters by ARN and authenticates
+    # with its capability role through the access entry below, so no endpoint, CA or
+    # assumable role travels in the payload any more.
+    server       = module.eks.cluster_arn
+    config       = {}
   })
-}
-
-################################################################################
-# ArgoCD EKS Access
-################################################################################
-resource "aws_iam_role" "spoke" {
-  name_prefix =  "${local.name}-argocd-spoke"
-  assume_role_policy = data.aws_iam_policy_document.assume_role_policy.json
-}
-
-data "aws_iam_policy_document" "assume_role_policy" {
-  statement {
-    actions = ["sts:AssumeRole", "sts:TagSession"]
-    principals {
-      type        = "AWS"
-      identifiers = [data.aws_ssm_parameter.argocd_hub_role.value]
-    }
-  }
 }
 
 ################################################################################
@@ -263,9 +239,9 @@ module "eks" {
   enable_cluster_creator_admin_permissions = true
 
   access_entries = {
-    # This is the role that will be assume by the hub cluster role to access the spoke cluster
+    # The hub Argo CD (EKS Capability) reaches this spoke with its capability role
     argocd = {
-      principal_arn = aws_iam_role.spoke.arn
+      principal_arn = data.aws_ssm_parameter.argocd_hub_role.value
 
       policy_associations = {
         argocd = {

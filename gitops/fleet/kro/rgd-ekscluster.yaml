@@ -3,8 +3,9 @@
 #
 # Trimmed from the upstream pattern patterns/kro-eks-cluster-mgmt/charts/kro/resource-groups/eks/rg-eks.yaml:
 # no VPC, no Karpenter, no observability roles. Auto Mode owns networking, storage,
-# load balancing and the Pod Identity agent, so the graph only needs the cluster, the
-# roles Argo CD and External Secrets assume, and the bridge payload.
+# load balancing and the Pod Identity agent; the hub Argo CD is an EKS Capability that reaches
+# clusters by ARN with its own role. So the graph only needs the cluster, the access entries,
+# the External Secrets role and the bridge payload.
 #
 # Requires the ACK and kro EKS Capabilities on the hub (team stack, cdk/lib/team-stack.ts).
 ---
@@ -25,7 +26,7 @@ spec:
       k8sVersion: string | default="1.34"
       # IAM principal that gets cluster-admin on the new cluster (the participant role)
       adminRoleArn: string
-      # Role the hub Argo CD runs as (SSM eks-fleet-workshop-gitops-argocd-central-role)
+      # Capability role of the hub Argo CD (SSM eks-fleet-workshop-gitops-argocd-central-role)
       hubArgocdRoleArn: string
       network:
         vpcId: string
@@ -139,14 +140,21 @@ spec:
           storageConfig:
             blockStorage:
               enabled: true
+          # Public endpoint only: the dev cluster shares the hub VPC, and with private access on
+          # the hub resolves the endpoint to the control plane ENI, whose security group does not
+          # admit the hub nodes (measured 2026-11-14: Argo CD "dial tcp 10.0.x.x:443: i/o timeout").
+          # With the public endpoint every caller, hub included, reaches it through NAT.
           resourcesVPCConfig:
-            endpointPrivateAccess: true
+            endpointPrivateAccess: false
             endpointPublicAccess: true
             subnetIDs:
               - "${schema.spec.network.subnet1Id}"
               - "${schema.spec.network.subnet2Id}"
           upgradePolicy:
             supportType: STANDARD
+          # All five log types, or none: EKS reports the disabled types as a second entry, the
+          # controller reads that as drift and loops on UpdateClusterConfig (InvalidParameterException
+          # every 15 s, measured 2026-11-14), which also blocks every later update of the cluster.
           logging:
             clusterLogging:
               - enabled: true
@@ -154,6 +162,8 @@ spec:
                   - api
                   - audit
                   - authenticator
+                  - controllerManager
+                  - scheduler
           tags:
             kro-management: "${schema.spec.name}"
             tenant: "${schema.spec.tenant}"
@@ -161,34 +171,10 @@ spec:
             Blueprint: "${schema.spec.name}"
 
     ###########################################################
-    # Argo CD access: the hub Argo CD assumes this role to reach the spoke
-    # (same contract as aws_iam_role.spoke in terraform/spokes/main.tf)
+    # Argo CD access: the hub Argo CD is an EKS Capability and reaches every cluster by ARN
+    # with its capability role, so the spoke only needs an access entry for that role
+    # (the same thing terraform/spokes/main.tf does for staging and prod).
     ###########################################################
-    - id: argocdRole
-      template:
-        apiVersion: iam.services.k8s.aws/v1alpha1
-        kind: Role
-        metadata:
-          name: "${schema.spec.name}-argocd-spoke"
-          annotations:
-            services.k8s.aws/region: ${schema.spec.region}
-        spec:
-          name: "${schema.spec.name}-argocd-spoke"
-          assumeRolePolicyDocument: |
-            {
-              "Version": "2012-10-17",
-              "Statement": [
-                {
-                  "Effect": "Allow",
-                  "Principal": { "AWS": "${schema.spec.hubArgocdRoleArn}" },
-                  "Action": ["sts:AssumeRole", "sts:TagSession"]
-                }
-              ]
-            }
-          tags:
-            - key: kro-management
-              value: "${schema.spec.name}"
-
     - id: accessEntryArgocd
       template:
         apiVersion: eks.services.k8s.aws/v1alpha1
@@ -199,7 +185,7 @@ spec:
             services.k8s.aws/region: ${schema.spec.region}
         spec:
           clusterName: "${ekscluster.spec.name}"
-          principalARN: "${argocdRole.status.ackResourceMetadata.arn}"
+          principalARN: "${schema.spec.hubArgocdRoleArn}"
           type: STANDARD
           accessPolicies:
             - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
@@ -280,6 +266,9 @@ spec:
             - key: kro-management
               value: "${schema.spec.name}"
 
+    # Two associations, as in the spokes: the hub installs External Secrets into the argocd
+    # namespace (fleet-spoke-external-secrets ApplicationSet), the add-ons chart would install
+    # it into external-secrets. Same service account name in both.
     - id: externalSecretsPodIdentity
       template:
         apiVersion: eks.services.k8s.aws/v1alpha1
@@ -294,6 +283,20 @@ spec:
           serviceAccount: external-secrets-sa
           roleARN: "${externalSecretsRole.status.ackResourceMetadata.arn}"
 
+    - id: externalSecretsPodIdentityFleet
+      template:
+        apiVersion: eks.services.k8s.aws/v1alpha1
+        kind: PodIdentityAssociation
+        metadata:
+          name: "${schema.spec.name}-external-secrets-fleet"
+          annotations:
+            services.k8s.aws/region: ${schema.spec.region}
+        spec:
+          clusterName: "${ekscluster.spec.name}"
+          namespace: argocd
+          serviceAccount: external-secrets-sa
+          roleARN: "${externalSecretsRole.status.ackResourceMetadata.arn}"
+
     ###########################################################
     # GitOps Bridge payload: the same JSON Terraform writes for staging and prod.
     # fleet-hub-secrets (ExternalSecret on the hub) turns it into the Argo CD cluster Secret.
@@ -304,6 +307,9 @@ spec:
         kind: Secret
         metadata:
           name: "${schema.spec.name}-bridge-payload"
+          annotations:
+            # explicit dependency: the hub Argo CD can only connect once its access entry exists
+            fleet.kro.run/argocd-access-entry: "${accessEntryArgocd.metadata.name}"
         type: Opaque
         stringData:
           bridge: |
@@ -334,17 +340,8 @@ spec:
                 "adot_collector_service_account": "adot-collector-kubeprometheus",
                 "amp_endpoint_url": "none"
               },
-              "server": "${ekscluster.status.endpoint}",
-              "config": {
-                "tlsClientConfig": {
-                  "insecure": false,
-                  "caData": "${ekscluster.status.certificateAuthority.data}"
-                },
-                "awsAuthConfig": {
-                  "clusterName": "${schema.spec.name}",
-                  "roleARN": "${argocdRole.status.ackResourceMetadata.arn}"
-                }
-              }
+              "server": "${ekscluster.status.ackResourceMetadata.arn}",
+              "config": {}
             }
 
     - id: bridgeSecret

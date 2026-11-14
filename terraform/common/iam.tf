@@ -1,36 +1,33 @@
 ################################################################################
 # ArgoCD EKS Access
 ################################################################################
+# Argo CD on the hub runs as an EKS Capability (managed, outside the cluster). This is its
+# capability role: EKS assumes it to reach AWS services for Argo CD, and the spokes grant it
+# cluster-admin through an access entry (terraform/spokes/main.tf), which is how the managed
+# Argo CD reaches other clusters. It replaced the Pod Identity role of the self-managed hub
+# Argo CD; the SSM parameter below kept its name so every consumer reads the new ARN.
 resource "aws_iam_role" "argocd_central" {
   name_prefix = "${local.context_prefix}-argocd-hub"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "AllowEksAuthToAssumeRoleForPodIdentity"
+        Sid    = "AllowEksCapabilitiesToAssumeRole"
         Effect = "Allow"
-        Action = ["sts:AssumeRole","sts:TagSession"]
+        Action = ["sts:AssumeRole", "sts:TagSession"]
         Principal = {
-          Service = "pods.eks.amazonaws.com"
+          Service = "capabilities.eks.amazonaws.com"
         }
       },
     ]
   })
-  inline_policy {
-    name = "argocd"
-
-    policy = jsonencode({
-      Version = "2012-10-17"
-      Statement = [
-        {
-          Action   = ["sts:AssumeRole", "sts:TagSession"]
-          Effect   = "Allow"
-          Resource = "*"
-        },
-      ]
-    })
-  }
   tags = local.tags
+}
+# Git repositories are reached with Kubernetes repository Secrets, so the capability needs
+# no CodeConnections or Secrets Manager permissions. ECR pull covers OCI Helm charts.
+resource "aws_iam_role_policy_attachment" "argocd_central_ecr" {
+  role       = aws_iam_role.argocd_central.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly"
 }
 # Creating parameter for all clusters to read
 resource "aws_ssm_parameter" "argocd_hub_role" {
