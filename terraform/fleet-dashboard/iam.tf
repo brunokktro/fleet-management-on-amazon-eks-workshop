@@ -66,6 +66,13 @@ data "aws_iam_policy_document" "eks_insights_role_policy_document" {
   }
 
   statement {
+    sid       = "AllowListEnabledRegions"
+    effect    = "Allow"
+    resources = ["*"]
+    actions   = ["ec2:DescribeRegions"]
+  }
+
+  statement {
     sid       = "AllowEKSClustersAccess"
     effect    = "Allow"
     resources = ["arn:aws:eks:*:*:*"]
@@ -143,3 +150,23 @@ resource "aws_iam_policy" "eks_insights_role_access_policy" {
   policy = data.aws_iam_policy_document.eks_insights_role_policy_document.json
 }
 
+
+# The Glue script reads the Argo CD Applications of every fleet cluster with kubectl, so the Glue
+# role gets a read-only access entry on each of them. AdminView (get/list/watch on every API group)
+# because Applications are custom resources that AmazonEKSViewPolicy does not cover.
+resource "aws_eks_access_entry" "glue" {
+  for_each      = toset(var.cluster_names)
+  cluster_name  = each.value
+  principal_arn = aws_iam_role.eks_insights_glue_role.arn
+}
+
+resource "aws_eks_access_policy_association" "glue_view" {
+  for_each      = toset(var.cluster_names)
+  cluster_name  = each.value
+  principal_arn = aws_iam_role.eks_insights_glue_role.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminViewPolicy"
+  access_scope {
+    type = "cluster"
+  }
+  depends_on = [aws_eks_access_entry.glue]
+}

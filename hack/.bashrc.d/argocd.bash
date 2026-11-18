@@ -12,23 +12,28 @@ function argocd_credentials (){
         sleep 1
     done
 	export ARGOCD_PWD=$(kubectl get secrets argocd-initial-admin-secret -n argocd --template='{{index .data.password | base64decode}}' --context $1)
-    argocd login "localhost:$2" --plaintext --username admin --password $ARGOCD_PWD --name $1
+    # Argo CD 3.5 speaks h2c on its plaintext port and kubectl port-forward resets that on loopback
+    # (argoproj/argo-cd#28179): --grpc-web keeps the CLI on HTTP/1.1 and --skip-test-tls skips the raw dial.
+    argocd login "localhost:$2" --plaintext --grpc-web --skip-test-tls --username admin --password $ARGOCD_PWD --name $1
 	echo "ArgoCD Username: admin"
 	echo "ArgoCD Password: $ARGOCD_PWD"
 	echo "ArgoCD URL: $IDE_URL/proxy/$2"
 }
 
-# The hub Argo CD is an EKS Capability: no pods, no admin password, no port-forward. The CLI
-# works in core mode (straight against the Application objects on the hub) and the UI is the
-# managed endpoint, signed in through IAM Identity Center as workshop-admin.
+# The hub Argo CD is an EKS Capability: no pods, no admin password, no port-forward and no API
+# server for the argocd CLI to log in to (core mode needs a local repo-server, which the hub lacks).
+# Hub Applications are read and synced with kubectl; the UI is the managed endpoint, signed in
+# through IAM Identity Center as workshop-admin.
 function argocd_hub_credentials (){
-	kubectl config use-context ${HUB_CONTEXT:-fleet-hub-cluster} >/dev/null
-	kubectl config set-context --current --namespace argocd >/dev/null
-	argocd login --core >/dev/null
 	export ARGOCD_HUB_URL=$(aws ssm --region $AWS_REGION get-parameter --name eks-fleet-workshop-gitops-argocd-server-url --query Parameter.Value --output text)
-	echo "ArgoCD (hub, EKS Capability) CLI: core mode on context ${HUB_CONTEXT:-fleet-hub-cluster}"
+	echo "ArgoCD (hub, EKS Capability): no CLI login, read Applications with 'hub_apps'"
 	echo "ArgoCD Username: workshop-admin (IAM Identity Center, LOG IN VIA SSO)"
 	echo "ArgoCD URL: $ARGOCD_HUB_URL"
+}
+# hub_apps [name-filter] : sync and health of the hub Applications, the kubectl equivalent of 'argocd app list'
+function hub_apps (){
+	kubectl --context ${HUB_CONTEXT:-fleet-hub-cluster} get applications -n argocd \
+	  -o custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status | { [ -n "$1" ] && grep -E "NAME|$1" || cat; }
 }
 function argocd_staging_credentials (){
 	argocd_credentials ${STAGING_CONTEXT:-fleet-staging-cluster} 8082

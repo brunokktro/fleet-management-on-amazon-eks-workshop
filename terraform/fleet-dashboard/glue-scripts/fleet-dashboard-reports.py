@@ -1,5 +1,6 @@
 import boto3
 import logging
+import botocore.config
 import botocore.exceptions
 from datetime import datetime, date
 import csv
@@ -25,7 +26,22 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 master_session = boto3.session.Session()
-regions = boto3.session.Session().get_available_regions("eks")
+
+
+def enabled_eks_regions(session):
+    """Regions enabled for this account (opt-in regions that are not enabled have no reachable EKS
+    endpoint and a plain connect to them times out). Falls back to the partition list."""
+    eks_regions = set(session.get_available_regions("eks"))
+    try:
+        ec2 = session.client("ec2", config=botocore.config.Config(connect_timeout=5, retries={"max_attempts": 2}))
+        enabled = {r["RegionName"] for r in ec2.describe_regions()["Regions"]}
+        return sorted(eks_regions & enabled)
+    except Exception as e:  # ec2:DescribeRegions denied or unavailable: keep the full list
+        print(f"Could not list enabled regions ({type(e).__name__}), scanning the whole partition")
+        return sorted(eks_regions)
+
+
+regions = enabled_eks_regions(master_session)
 s3_client = master_session.client("s3")
 
 account_id=eks_dashboard_qs_account
@@ -359,26 +375,55 @@ def generate_argo_projects_data(consolidated_argo_projects_data):
         f"Argo projects data uploaded to s3://{bucket_name}/dashboard-datasets/{argo_projects_data_filename}"
     )
 
+def eks_bearer_token(cluster, region):
+    """Same token `aws eks get-token` produces: a presigned STS GetCallerIdentity with the cluster id header."""
+    from botocore.signers import RequestSigner
+    import base64
+    session = boto3.session.Session()
+    sts = session.client("sts", region_name=region)
+    signer = RequestSigner(sts.meta.service_model.service_id, region, "sts", "v4", session.get_credentials(), session.events)
+    params = {
+        "method": "GET",
+        "url": f"https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
+        "body": {},
+        "headers": {"x-k8s-aws-id": cluster},
+        "context": {},
+    }
+    signed = signer.generate_presigned_url(params, region_name=region, expires_in=60, operation_name="")
+    return "k8s-aws-v1." + base64.urlsafe_b64encode(signed.encode()).decode().rstrip("=")
+
+
 def set_kubeconfig(cluster, region) -> None:
+    """Write /tmp/kube-config/config for the cluster with boto3. The script installs a current boto3 at
+    runtime, which breaks the AWS CLI v1 preinstalled on Glue (KeyError: 'opsworkscm'), so
+    `aws eks update-kubeconfig` cannot be used here."""
     try:
-        subprocess.check_call(
-            [
-                "aws",
-                "eks",
-                "update-kubeconfig",
-                "--name",
-                cluster,
-                "--region",
-                region,
-                "--kubeconfig",
-                "/tmp/kube-config/config",
-            ],
-            stdout=subprocess.DEVNULL,
-        )  # nosec
-        kubeconfig_path = os.path.expanduser("/tmp/kube-config/config")
-        os.environ["KUBECONFIG"] = kubeconfig_path
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error setting KUBECONFIG: {e}")
+        eks = boto3.client("eks", region_name=region)
+        c = eks.describe_cluster(name=cluster)["cluster"]
+        kubeconfig = f"""apiVersion: v1
+kind: Config
+clusters:
+- name: {cluster}
+  cluster:
+    server: {c["endpoint"]}
+    certificate-authority-data: {c["certificateAuthority"]["data"]}
+contexts:
+- name: {cluster}
+  context:
+    cluster: {cluster}
+    user: {cluster}
+current-context: {cluster}
+users:
+- name: {cluster}
+  user:
+    token: {eks_bearer_token(cluster, region)}
+"""
+        os.makedirs("/tmp/kube-config", mode=0o777, exist_ok=True)
+        with open("/tmp/kube-config/config", "w") as f:
+            f.write(kubeconfig)
+        os.environ["KUBECONFIG"] = "/tmp/kube-config/config"
+    except Exception as e:
+        logger.error(f"Error setting KUBECONFIG for {cluster}: {e}")
 
 def get_argo_app_details(cluster, account_id, region):
     set_kubeconfig(cluster, region)
@@ -462,16 +507,21 @@ if __name__ == "__main__":
     for region in regions:
         print(f"Scanning for EKS clusters in region {region}...")
 
-        eks = boto3.client( "eks", region_name=region)
+        eks = boto3.client("eks", region_name=region, config=botocore.config.Config(connect_timeout=10, retries={"max_attempts": 2}))
 
         try:
             clusterslist = eks.list_clusters()
         except botocore.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "AuthFailure":
+            if e.response["Error"]["Code"] in ("AuthFailure", "UnrecognizedClientException", "InvalidClientTokenId"):
                 print(
                     f"Region {region} seems to be disabled for this account, skipping"
                 )
                 continue
+            raise
+        except (botocore.exceptions.EndpointConnectionError, botocore.exceptions.ConnectTimeoutError) as e:
+            # opt-in regions that are not enabled for the account have no reachable endpoint
+            print(f"Region {region} is not reachable from this account ({type(e).__name__}), skipping")
+            continue
         else:
             eksVersionsResponse = eks.describe_addon_versions()
             cluster_versions = set()

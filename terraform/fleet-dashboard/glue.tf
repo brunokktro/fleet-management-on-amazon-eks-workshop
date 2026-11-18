@@ -8,7 +8,9 @@ resource "aws_s3_object" "eks_org_data_script" {
 
 resource "aws_glue_job" "eks_org_data_glue_job" {
   name         = var.eks_org_data_glue_job_name
-  role_arn     = data.aws_iam_session_context.current_role.issuer_arn
+  # The job runs as the dedicated Glue role (iam.tf). The IDE identity cannot be reused: on the
+  # Kiro IDE the terminal runs as WSParticipantRole, which Glue is not allowed to assume.
+  role_arn     = aws_iam_role.eks_insights_glue_role.arn
   glue_version = var.eks_org_data_glue_version
 
   # security_configuration = var.eks_insights_glue_sec_config

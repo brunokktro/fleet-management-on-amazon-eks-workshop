@@ -77,3 +77,8 @@ variable "quicksight_datasets" {
     })
   }))
 }
+variable "cluster_names" {
+  description = "Fleet clusters the Glue job reads Argo CD Applications from"
+  type        = list(string)
+  default     = ["fleet-hub-cluster", "fleet-spoke-staging", "fleet-spoke-prod"]
+}
